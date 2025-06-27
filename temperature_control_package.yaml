@@ -1,0 +1,174 @@
+# =====================================================================
+# Package for ESP8266 Temperature Controller
+# =====================================================================
+
+# 1. Climate Entity
+#    Defines the thermostat.
+mqtt:
+  climate:
+    name: "ESP8266 Thermostat"
+    unique_id: "esp8266_temperature_control_thermostat"
+    
+    availability:
+      - topic: "home/temperature_control/status"
+        payload_available: "online"
+        payload_not_available: "offline"
+        
+    modes:
+      - "auto"
+      - "heat"
+      - "off"
+
+    mode_state_topic: "home/temperature_control/state"
+    mode_state_template: >
+      {% if value_json.mode == 'AUTO' %}
+        auto
+      {% elif value_json.state == 'ON' %}
+        heat
+      {% else %}
+        off
+      {% endif %}
+      
+    mode_command_topic: "home/temperature_control/set"
+    mode_command_template: >
+      {%- if value == 'auto' -%}
+        {"mode": "AUTO"}
+      {%- elif value == 'heat' -%}
+        {"mode": "MANUAL", "state": "ON"}
+      {%- elif value == 'off' -%}
+        {"mode": "MANUAL", "state": "OFF"}
+      {%- endif -%}
+
+    current_temperature_topic: "home/temperature_control/temperature"
+    
+    temperature_command_topic: "home/temperature_control/set"
+    temperature_command_template: '{"target_temp": {{ value }} }'
+    temperature_state_topic: "home/temperature_control/state"
+    temperature_state_template: "{{ value_json.target_temp }}"
+    
+    action_topic: "home/temperature_control/state"
+    action_template: "{{ 'heating' if value_json.state == 'ON' else 'idle' }}"
+    
+    min_temp: 5
+    max_temp: 30
+    temp_step: 0.5
+    precision: 0.1
+
+# 2. Input Helpers for Operating Time Frost Protection and Temperature Hysteresis
+#    Creates the time input fields for the dashboard.
+input_datetime:
+  thermostat_start_time:
+    name: "Thermostat Start Time"
+    has_date: false
+    has_time: true
+    initial: "08:00"
+
+  thermostat_end_time:
+    name: "Thermostat End Time"
+    has_date: false
+    has_time: true
+    initial: "17:00"
+    
+#    Creates the number input field for fost protection and temperature hysteresis
+input_number:
+  thermostat_frost_protection_temp:
+    name: "Frost Protection Temperature"
+    min: 0
+    max: 15
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    
+  thermostat_delta_temp:
+    name: "Temperature Hysteresis"
+    min: 0.5
+    max: 5.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    mode: box
+    initial: 2.0
+    
+
+# 3. Automations to Sync Time Settings
+#    Keeps Home Assistant and the ESP8266 synchronized.
+automation:
+  - alias: "Thermostat Sync Start Time"
+    trigger:
+      - platform: state
+        entity_id: input_datetime.thermostat_start_time
+    action:
+      - service: mqtt.publish
+        data:
+          topic: "home/temperature_control/set"
+          payload: >
+            {
+              "start_hour": {{ state_attr('input_datetime.thermostat_start_time', 'hour') }},
+              "start_min": {{ state_attr('input_datetime.thermostat_start_time', 'minute') }}
+            }
+
+  - alias: "Thermostat Sync End Time"
+    trigger:
+      - platform: state
+        entity_id: input_datetime.thermostat_end_time
+    action:
+      - service: mqtt.publish
+        data:
+          topic: "home/temperature_control/set"
+          payload: >
+            {
+              "end_hour": {{ state_attr('input_datetime.thermostat_end_time', 'hour') }},
+              "end_min": {{ state_attr('input_datetime.thermostat_end_time', 'minute') }}
+            }
+
+  - alias: "Thermostat Sync from Device"
+    trigger:
+      - platform: mqtt
+        topic: "home/temperature_control/state"
+    action:
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.thermostat_start_time
+        data:
+          time: "{{ '%02d:%02d:00' | format(trigger.payload_json.start_hour, trigger.payload_json.start_min) }}"
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.thermostat_end_time
+        data:
+          time: "{{ '%02d:%02d:00' | format(trigger.payload_json.end_hour, trigger.payload_json.end_min) }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.thermostat_frost_protection_temp
+        data:
+          value: "{{ trigger.payload_json.frost_protection_temp | float }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.thermostat_delta_temp
+        data:
+          value: "{{ trigger.payload_json.delta_temp | float }}"
+
+          
+  - alias: "Thermostat Sync Frost Protection"
+    trigger:
+      - platform: state
+        entity_id: input_number.thermostat_frost_protection_temp
+    action:
+      - service: mqtt.publish
+        data:
+          topic: "home/temperature_control/set"
+          payload: >
+            {
+              "frost_protection_temp": {{ states('input_number.thermostat_frost_protection_temp') | float }}
+            }
+            
+  - alias: "Thermostat Sync Delta Temperature"
+    trigger:
+      - platform: state
+        entity_id: input_number.thermostat_delta_temp
+    action:
+      - service: mqtt.publish
+        data:
+          topic: "home/temperature_control/set"
+          payload: >
+            {
+              "delta_temp": {{ states('input_number.thermostat_delta_temp') | float }}
+            }
